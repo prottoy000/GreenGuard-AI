@@ -141,66 +141,41 @@ def add_relative_categories(data):
 
 
 def add_intervention_priority(data):
-    """Create an explainable, relative vegetation-intervention priority score.
-
-    Project-defined weights: 50% persistent heat, 30% vegetation deficit,
-    and 20% built-up spectral signal. Missing indicators are handled by
-    re-normalizing the weights available for each assessed grid.
-    """
+    """Calculate a relative vegetation-intervention shortlist score."""
     data = data.copy()
     for col in ["persistent_heat_score", "median_ndvi", "median_ndbi"]:
         if col not in data.columns:
             data[col] = np.nan
         data[col] = pd.to_numeric(data[col], errors="coerce")
-
     assessed = get_assessed_mask(data)
     heat_pct = data["persistent_heat_score"].where(assessed).rank(method="average", pct=True)
     ndvi_pct = data["median_ndvi"].where(assessed).rank(method="average", pct=True)
     ndbi_pct = data["median_ndbi"].where(assessed).rank(method="average", pct=True)
-
-    components = pd.DataFrame({
-        "heat": heat_pct,
-        "vegetation_deficit": 1.0 - ndvi_pct,
-        "builtup": ndbi_pct,
-    }, index=data.index)
+    components = pd.DataFrame({"heat": heat_pct, "vegetation_deficit": 1.0 - ndvi_pct, "builtup": ndbi_pct}, index=data.index)
     weights = pd.Series({"heat": 0.50, "vegetation_deficit": 0.30, "builtup": 0.20})
-    weighted_values = components.mul(weights, axis=1)
     available_weights = components.notna().mul(weights, axis=1).sum(axis=1)
-    score = weighted_values.sum(axis=1, min_count=1).div(available_weights.where(available_weights > 0)) * 100
-
-    # A grid needs at least heat and vegetation data to be considered for this
-    # specific intervention shortlist; built-up signal is an optional modifier.
+    score = components.mul(weights, axis=1).sum(axis=1, min_count=1).div(available_weights.where(available_weights > 0)) * 100
     eligible = assessed & data["persistent_heat_score"].notna() & data["median_ndvi"].notna()
     data["vegetation_intervention_score"] = score.where(eligible)
     data["vegetation_intervention_category"] = "Not assessed"
     valid = data.loc[eligible, "vegetation_intervention_score"].dropna()
     if not valid.empty:
         pct = valid.rank(method="average", pct=True)
-        data.loc[pct.index[pct <= 0.20], "vegetation_intervention_category"] = "Very Low"
-        data.loc[pct.index[(pct > 0.20) & (pct <= 0.40)], "vegetation_intervention_category"] = "Low"
-        data.loc[pct.index[(pct > 0.40) & (pct <= 0.60)], "vegetation_intervention_category"] = "Moderate"
-        data.loc[pct.index[(pct > 0.60) & (pct <= 0.80)], "vegetation_intervention_category"] = "High"
-        data.loc[pct.index[pct > 0.80], "vegetation_intervention_category"] = "Very High"
+        data.loc[pct.index[pct <= .20], "vegetation_intervention_category"] = "Very Low"
+        data.loc[pct.index[(pct > .20) & (pct <= .40)], "vegetation_intervention_category"] = "Low"
+        data.loc[pct.index[(pct > .40) & (pct <= .60)], "vegetation_intervention_category"] = "Moderate"
+        data.loc[pct.index[(pct > .60) & (pct <= .80)], "vegetation_intervention_category"] = "High"
+        data.loc[pct.index[pct > .80], "vegetation_intervention_category"] = "Very High"
     return data
 
 
 def intervention_reason(row):
-    """Create plain-language reasons grounded in each grid's relative signals."""
     reasons = []
-    heat = row.get("heat_category", "Not assessed")
-    veg = row.get("vegetation_category", "Not assessed")
-    built = row.get("builtup_category", "Not assessed")
-    if heat == "Persistent hotspot":
-        reasons.append("persistent heat")
-    elif heat == "Warm area":
-        reasons.append("moderate-to-high heat")
-    if veg == "Low vegetation":
-        reasons.append("low vegetation signal")
-    if built == "Higher built-up signal":
-        reasons.append("higher built-up signal")
-    if not reasons:
-        reasons.append("combined relative indicators")
-    return ", ".join(reasons).capitalize()
+    if row.get("heat_category") == "Persistent hotspot": reasons.append("persistent heat")
+    elif row.get("heat_category") == "Warm area": reasons.append("moderate-to-high heat")
+    if row.get("vegetation_category") == "Low vegetation": reasons.append("low vegetation signal")
+    if row.get("builtup_category") == "Higher built-up signal": reasons.append("higher built-up signal")
+    return ", ".join(reasons).capitalize() if reasons else "Combined relative indicators"
 
 
 def get_cluster_category(data):
@@ -296,7 +271,9 @@ def create_map(data, layer):
     elif layer == "Green-planning priority":
         col, cmap, order, title, desc = "priority_category", PRIORITY_COLORS, list(PRIORITY_COLORS), "Green-Planning Priority", "Exploratory planning priority based on persistent heat, vegetation deficit and built-up signal."
     elif layer == "Vegetation Intervention Priority":
-        col, cmap, order, title, desc = "vegetation_intervention_category", PRIORITY_COLORS, list(PRIORITY_COLORS), "Vegetation Intervention Priority", "Relative shortlist for vegetation-planning review, combining persistent heat (50%), vegetation deficit (30%), and built-up signal (20%). Weights are exploratory and do not estimate the temperature reduction caused by planting."
+        if "vegetation_intervention_category" not in data.columns:
+            data = add_intervention_priority(data)
+        col, cmap, order, title, desc = "vegetation_intervention_category", PRIORITY_COLORS, list(PRIORITY_COLORS), "Vegetation Intervention Priority", "Relative shortlist for vegetation-planning review. Combines persistent heat (50%), vegetation deficit (30%), and built-up signal (20%); exploratory weights, not a measured planting impact."
     elif layer == "Vegetation (NDVI)":
         col, cmap, order, title, desc = "vegetation_category", VEGETATION_COLORS, list(VEGETATION_COLORS), "Vegetation (NDVI)", "Relative vegetation signal; NDVI is not a direct tree count."
     elif layer == "Built-up indicator (NDBI)":
@@ -383,6 +360,24 @@ def create_map(data, layer):
             hovertemplate=hovertemplate,
         ))
 
+    # Label every grid polygon with its grid ID at the polygon centroid.
+    # Keep labels as a separate map trace so category colors and hover details remain intact.
+    label_data = data.dropna(subset=["map_lat", "map_lon"]).copy()
+    if not label_data.empty:
+        fig.add_trace(
+            go.Scattermap(
+                lat=label_data["map_lat"],
+                lon=label_data["map_lon"],
+                mode="text",
+                text=label_data[grid_key].astype(str),
+                textposition="middle center",
+                textfont={"size": 9, "color": "#FFFFFF"},
+                hoverinfo="skip",
+                showlegend=False,
+                name="Grid IDs",
+            )
+        )
+
     fig.update_layout(
         map={"style":"open-street-map", "center":{"lat":23.82,"lon":90.41}, "zoom":10.3},
         paper_bgcolor=DARK_BG,
@@ -397,14 +392,14 @@ def create_map(data, layer):
 
 # ------------------------------ Load & validate ------------------------------
 gdf = load_data()
+gdf = add_intervention_priority(gdf)
 required = ["grid_cell_id", "persistent_heat_score", "green_priority_score", "median_ndvi"]
 missing = [c for c in required if c not in gdf.columns]
 if missing:
     st.error("Dashboard dataset is missing required columns: " + ", ".join(missing)); st.stop()
-for col in ["persistent_heat_score", "green_priority_score", "median_ndvi", "median_ndbi", "vegetation_intervention_score", "slope_c_per_year", "net_change_c", "r_squared", "start_lst_c", "end_lst_c"]:
+for col in ["persistent_heat_score", "green_priority_score", "median_ndvi", "median_ndbi", "slope_c_per_year", "net_change_c", "r_squared", "start_lst_c", "end_lst_c"]:
     if col in gdf.columns: gdf[col] = to_numeric(gdf, col)
 if "median_ndbi" not in gdf.columns: gdf["median_ndbi"] = np.nan
-gdf = add_intervention_priority(gdf)
 assessed_mask = get_assessed_mask(gdf)
 
 # ------------------------------ Hero ------------------------------
@@ -446,7 +441,7 @@ with info_col:
     elif selected_layer == "Green-planning priority":
         items = [(PRIORITY_COLORS[k],k,"Relative exploratory priority category.") for k in ["Very High","High","Moderate","Low","Very Low","Not assessed"]]
     elif selected_layer == "Vegetation Intervention Priority":
-        items = [(PRIORITY_COLORS[k],k,"Relative rank for vegetation-planning review.") for k in ["Very High","High","Moderate","Low","Very Low","Not assessed"]]
+        items = [(PRIORITY_COLORS[k], k, "Relative rank for vegetation-planning review.") for k in ["Very High", "High", "Moderate", "Low", "Very Low", "Not assessed"]]
     elif selected_layer == "Vegetation (NDVI)":
         items = [(VEGETATION_COLORS[k],k,"Relative NDVI category.") for k in VEGETATION_COLORS]
     elif selected_layer == "Built-up indicator (NDBI)":
@@ -504,92 +499,22 @@ with extra[2]:
 st.markdown("---")
 st.markdown("## 🌳 Where should DNCC increase vegetation first?")
 st.markdown("<p class='small-note'>This shortlist highlights grids that may deserve earlier field review for tree planting, pocket parks, or other vegetation interventions. It ranks relative need; it does not predict how many degrees planting would reduce temperature.</p>", unsafe_allow_html=True)
-
 priority_df = gdf.copy()
 priority_df["Intervention priority"] = priority_df["vegetation_intervention_category"]
 priority_df["Why this grid is flagged"] = priority_df.apply(intervention_reason, axis=1)
-priority_df = priority_df[
-    priority_df["vegetation_intervention_score"].notna()
-    & priority_df["vegetation_intervention_category"].isin(["Very High", "High", "Moderate", "Low", "Very Low"])
-].sort_values("vegetation_intervention_score", ascending=False)
-
+priority_df = priority_df[priority_df["vegetation_intervention_score"].notna()].sort_values("vegetation_intervention_score", ascending=False)
 if priority_df.empty:
-    st.info("A vegetation-intervention shortlist cannot be created because the required heat and vegetation indicators are unavailable for assessed grids.")
+    st.info("A vegetation-intervention shortlist cannot be created because required heat and vegetation indicators are unavailable.")
 else:
-    top_n = min(20, len(priority_df))
-    top_priority = priority_df.head(top_n).copy()
+    top_priority = priority_df.head(min(20, len(priority_df))).copy()
     top_priority.insert(0, "Rank", range(1, len(top_priority) + 1))
-
-    pcols = st.columns(3)
-    very_high_n = int((priority_df["vegetation_intervention_category"] == "Very High").sum())
-    high_n = int((priority_df["vegetation_intervention_category"] == "High").sum())
-    pcols[0].metric("Highest-priority grids", f"{very_high_n:,}", "Top 20% of assessed intervention scores")
-    pcols[1].metric("High-priority grids", f"{high_n:,}", "Next 20% of assessed intervention scores")
-    pcols[2].metric("Grids assessed for this shortlist", f"{len(priority_df):,}", "Requires heat and vegetation indicators")
-
-    with st.expander("How the shortlist is calculated", expanded=False):
-        st.markdown("""
-        The score is a **relative planning aid**, not a measured climate-risk reduction model:
-        - **50% persistent heat:** grids that rank hotter historically receive more priority.
-        - **30% vegetation deficit:** grids with a weaker satellite vegetation signal receive more priority.
-        - **20% built-up signal:** a stronger built-up spectral signal adds priority.
-
-        The indicators are normalized by relative rank across the assessed grids. The weights are project-defined and have not been validated against real-world planting outcomes. NDVI is not a tree count, and NDBI is not a direct building-density measure. Use the list to guide field verification of available planting space, land ownership, utilities, water access, and community needs.
-        """)
-
-    display_cols = [
-        "Rank", "grid_cell_id", "Intervention priority",
-        "vegetation_intervention_score", "persistent_heat_score",
-        "median_ndvi", "median_ndbi", "Why this grid is flagged",
-    ]
-    display = top_priority[display_cols].rename(columns={
-        "grid_cell_id": "Grid ID",
-        "vegetation_intervention_score": "Priority score",
-        "persistent_heat_score": "Heat score",
-        "median_ndvi": "Median NDVI",
-        "median_ndbi": "Median NDBI",
-    })
+    display_cols = ["Rank", "grid_cell_id", "Intervention priority", "vegetation_intervention_score", "persistent_heat_score", "median_ndvi", "median_ndbi", "Why this grid is flagged"]
+    display = top_priority[display_cols].rename(columns={"grid_cell_id":"Grid ID", "vegetation_intervention_score":"Priority score", "persistent_heat_score":"Heat score", "median_ndvi":"Median NDVI", "median_ndbi":"Median NDBI"})
     for c in ["Priority score", "Heat score", "Median NDVI", "Median NDBI"]:
         display[c] = pd.to_numeric(display[c], errors="coerce").round(3)
-    st.markdown("### Suggested grids for first review")
     st.dataframe(display, use_container_width=True, hide_index=True)
-    csv_bytes = display.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "Download priority shortlist (CSV)",
-        data=csv_bytes,
-        file_name="greenguard_vegetation_intervention_priority.csv",
-        mime="text/csv",
-    )
-    st.caption("A high score means higher relative priority for review—not a guarantee of reduced temperature or overall DNCC climate risk. Unassessed grids are excluded rather than treated as low priority.")
-
-# ------------------------------ Future LST range forecast ------------------------------
-st.markdown("---")
-st.markdown("## 🔮 Future LST Range & Heat-Risk Estimate")
-if not FORECAST_PATH.exists():
-    st.info("Forecast outputs have not been generated yet. Run `python src/build_lst_forecasts.py` from the project root after confirming the annual grid-level LST CSV is present. The script performs rolling-origin backtesting, compares a trend model with a persistence baseline, and calibrates ranges from held-out errors.")
-else:
-    forecast_row = gdf[gdf["grid_cell_id"].astype(str) == selected_grid_id]
-    if forecast_row.empty:
-        st.warning("No forecast record is available for this grid.")
-    else:
-        fr = forecast_row.iloc[0]
-        fcols = st.columns(2, gap="medium")
-        for col_box, horizon, year_key, point_key, low_key, high_key, risk_key in [
-            (fcols[0], "1-Year Ahead", "forecast_year_1", "lst_point_1y", "lst_lower_1y", "lst_upper_1y", "heat_risk_1y"),
-            (fcols[1], "2-Year Ahead", "forecast_year_2", "lst_point_2y", "lst_lower_2y", "lst_upper_2y", "heat_risk_2y"),
-        ]:
-            with col_box:
-                st.markdown(f"### {horizon}")
-                point, low, high = fr.get(point_key, np.nan), fr.get(low_key, np.nan), fr.get(high_key, np.nan)
-                target_year = fr.get(year_key, np.nan)
-                risk = fr.get(risk_key, "Not assessed")
-                if pd.notna(point) and pd.notna(low) and pd.notna(high):
-                    st.metric("Estimated hot-season LST", f"{low:.1f}–{high:.1f} °C", f"Point estimate: {point:.1f} °C")
-                    st.write(f"**Target year:** {int(target_year) if pd.notna(target_year) else 'N/A'}")
-                    st.write(f"**Estimated heat-risk category:** {risk}")
-                else:
-                    st.warning("Not enough historical observations to create this horizon's forecast.")
-        st.caption("Forecast intervals are calibrated from rolling-origin historical errors, not a guarantee. Heat-risk labels are relative to historical LST quantiles and are not official health-risk thresholds. Check the backtest metrics before interpreting these outputs.")
+    st.download_button("Download priority shortlist (CSV)", data=display.to_csv(index=False).encode("utf-8-sig"), file_name="greenguard_vegetation_intervention_priority.csv", mime="text/csv")
+    st.caption("Scores are exploratory relative ranks. Field verification is required before intervention decisions.")
 
 # ------------------------------ Historical temperature analysis ------------------------------
 st.markdown("---")
@@ -621,17 +546,6 @@ else:
         tc[0].metric("Increasing slope", f"{increasing_n:,}", f"{increasing_n/total_trend_grids:.1%} of trend records" if total_trend_grids else None)
         tc[1].metric("Relatively stable", f"{stable_n:,}", f"{stable_n/total_trend_grids:.1%} of trend records" if total_trend_grids else None)
         tc[2].metric("Decreasing slope", f"{decreasing_n:,}", f"{decreasing_n/total_trend_grids:.1%} of trend records" if total_trend_grids else None)
-
-        st.markdown("### DNCC-wide annual LST summary")
-        if {"year","mean_lst_c","median_lst_c"}.issubset(yearly.columns):
-            fig_year = go.Figure()
-            fig_year.add_trace(go.Scatter(x=yearly["year"], y=yearly["mean_lst_c"], mode="lines+markers", name="Mean LST", line={"color":"#42D392","width":3}, marker={"size":8}, hovertemplate="Year %{x}<br>Mean LST: %{y:.2f}°C<extra></extra>"))
-            fig_year.add_trace(go.Scatter(x=yearly["year"], y=yearly["median_lst_c"], mode="lines+markers", name="Median LST", line={"color":"#F2A541","width":3}, marker={"size":8}, hovertemplate="Year %{x}<br>Median LST: %{y:.2f}°C<extra></extra>"))
-            fig_year.update_layout(template="plotly_dark", paper_bgcolor=DARK_BG, plot_bgcolor=PANEL_BG, font={"color":TEXT}, xaxis_title="Year", yaxis_title="Land Surface Temperature (°C)", legend={"font":{"size":14}}, margin={"l":15,"r":15,"t":35,"b":15}, height=420)
-            st.plotly_chart(fig_year, use_container_width=True)
-            st.caption("Annual mean and median describe the sampled hot-season surface temperatures. Year-to-year differences can reflect observation timing, cloud/coverage conditions, and surface variability; do not interpret the graph alone as a causal climate trend.")
-        else:
-            st.warning("Yearly summary file is missing expected columns year, mean_lst_c, median_lst_c.")
 
         st.markdown("### Grid-wise historical trend")
         trend_map_col, trend_detail_col = st.columns([1.15,1])
@@ -668,123 +582,52 @@ else:
 
 # Clustering outputs remain available in the processed data; advanced cluster tables are hidden from the public dashboard.
 
-
 # ------------------------------ Experimental ML Prediction ------------------------------
 st.markdown("---")
 st.markdown("## Experimental AI Heat Prediction")
-st.caption(
-    "Random Forest model trained on historical grid-level features. "
-    "Predictions are experimental and are not validated climate projections."
-)
-
+st.caption("Random Forest model trained on historical grid-level features. Predictions are experimental and are not validated climate projections.")
 ML_MODEL_PATH = ROOT / "data" / "processed" / "greenguard_random_forest.joblib"
 ML_DATA_PATH = ROOT / "data" / "processed" / "greenguard_temporal_dataset_2014_2025.csv"
-
-ML_FEATURES = [
-    "LST_C_mean",
-    "NDVI_mean",
-    "NDBI_mean",
-    "air_temp_c",
-    "relative_humidity_pct",
-    "wind_speed_ms",
-    "rainfall_mm_season",
-]
-
+ML_FEATURES = ["LST_C_mean", "NDVI_mean", "NDBI_mean", "air_temp_c", "relative_humidity_pct", "wind_speed_ms", "rainfall_mm_season"]
 if not ML_MODEL_PATH.exists() or not ML_DATA_PATH.exists():
     st.warning("ML model or temporal feature dataset is missing.")
 else:
     try:
         import joblib
-
         @st.cache_resource
         def load_ml_model(path):
             return joblib.load(path)
-
         @st.cache_data
         def load_ml_features(path):
             return pd.read_csv(path)
-
         ml_model = load_ml_model(str(ML_MODEL_PATH))
         ml_data = load_ml_features(str(ML_DATA_PATH))
-
         required_columns = ["grid_cell_id", "year"] + ML_FEATURES
-
         if not set(required_columns).issubset(ml_data.columns):
             st.error("Temporal dataset is missing required model features.")
         else:
             ml_data["grid_cell_id"] = ml_data["grid_cell_id"].astype(str)
+            ml_data["year"] = pd.to_numeric(ml_data["year"], errors="coerce")
             ml_data = ml_data.sort_values("year")
-
-            # Latest available feature row for each grid.
-            latest_ml = ml_data.drop_duplicates(
-                subset=["grid_cell_id"], keep="last"
-            ).copy()
-
-            latest_ml[ML_FEATURES] = latest_ml[ML_FEATURES].apply(
-                pd.to_numeric, errors="coerce"
-            )
-
+            latest_ml = ml_data.drop_duplicates(subset=["grid_cell_id"], keep="last").copy()
+            latest_ml[ML_FEATURES] = latest_ml[ML_FEATURES].apply(pd.to_numeric, errors="coerce")
             latest_ml = latest_ml.dropna(subset=ML_FEATURES)
-
             if latest_ml.empty:
                 st.warning("No complete feature rows are available for prediction.")
             else:
-                selected_ml_grid = st.selectbox(
-                    "Select grid for ML prediction",
-                    sorted(latest_ml["grid_cell_id"].unique()),
-                    key="experimental_ml_grid",
-                )
-
-                row = latest_ml[
-                    latest_ml["grid_cell_id"] == selected_ml_grid
-                ].iloc[0]
-
-                input_data = pd.DataFrame(
-                    [[row[col] for col in ML_FEATURES]],
-                    columns=ML_FEATURES,
-                )
-
+                selected_ml_grid = st.selectbox("Select grid for ML prediction", sorted(latest_ml["grid_cell_id"].unique()), key="experimental_ml_grid")
+                row = latest_ml[latest_ml["grid_cell_id"] == selected_ml_grid].iloc[0]
+                input_data = pd.DataFrame([[row[col] for col in ML_FEATURES]], columns=ML_FEATURES)
                 predicted_lst = float(ml_model.predict(input_data)[0])
                 last_observed_lst = float(row["LST_C_mean"])
-
                 col1, col2, col3 = st.columns(3)
-
-                col1.metric(
-                    "Experimental RF estimate",
-                    f"{predicted_lst:.2f} °C",
-                    help="Random Forest estimate for the next target year."
-                )
-                col2.metric(
-                    "Latest observed LST",
-                    f"{last_observed_lst:.2f} °C",
-                    f"Feature year: {int(row['year'])}"
-                )
-                col3.metric(
-                    "RF vs. latest LST",
-                    f"{predicted_lst - last_observed_lst:+.2f} °C",
-                    help="Difference between the RF estimate and the latest input LST; not a guaranteed temperature change."
-                )
-
-                st.caption(
-                    f"Grid: {selected_ml_grid} | "
-                    f"Input year: {int(row['year'])} | "
-                    f"Target year: {int(row['year']) + 1}"
-                )
-
+                col1.metric("Experimental RF estimate", f"{predicted_lst:.2f} °C", help="Random Forest estimate for the next target year.")
+                col2.metric("Latest observed LST", f"{last_observed_lst:.2f} °C", f"Feature year: {int(row['year'])}")
+                col3.metric("RF vs. latest LST", f"{predicted_lst - last_observed_lst:+.2f} °C", help="Difference from the latest input LST; not a guaranteed temperature change.")
+                st.caption(f"Grid: {selected_ml_grid} | Input year: {int(row['year'])} | Target year: {int(row['year']) + 1}")
                 with st.expander("View model input features"):
-                    st.dataframe(
-                        input_data,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                st.warning(
-                    "Validation note: the current Random Forest did not "
-                    "consistently outperform the persistence baseline in "
-                    "previous temporal tests. Treat this output as an "
-                    "experimental model demonstration, not a reliable forecast."
-                )
-
+                    st.dataframe(input_data, use_container_width=True, hide_index=True)
+                st.warning("Validation note: the current Random Forest did not consistently outperform the persistence baseline in previous temporal tests. Treat this as an experimental model demonstration, not a reliable forecast.")
     except Exception as exc:
         st.error(f"Could not generate the ML prediction: {exc}")
 
@@ -802,14 +645,11 @@ with st.expander("How to interpret the scores", expanded=False):
     ### 3. NDVI and NDBI
     NDVI is a satellite-derived vegetation signal; NDBI is a spectral built-up indicator. Neither is a direct tree count or building-density measurement. Categories are relative to assessed grids.
 
-    ### 3a. Vegetation intervention priority
-    The shortlist ranks assessed grids using a project-defined combination of persistent heat (50%), vegetation deficit (30%), and built-up spectral signal (20%). It identifies where field review may be useful; it does not estimate the causal temperature reduction from planting or prove that DNCC-wide climate risk will fall by a specific amount.
-
     ### 4. Historical temperature trends
     Each grid's annual LST series is fitted with a linear trend. The slope is in °C/year. The script labels slopes >= +0.10 as Increasing and <= −0.10 as Decreasing; the threshold is exploratory, not a statistical significance test. R² measures linear fit, not causation.
 
-    ### 5. Future LST range forecast
-    The forecast builder compares a per-grid linear trend with a persistence baseline using rolling-origin, out-of-time tests. Prediction intervals are calibrated from absolute errors on held-out historical years. With only a short annual time series, intervals may be wide and should be treated as experimental. Risk labels are relative to historical LST quantiles, not official health-risk thresholds.
+    ### 5. Experimental Random Forest prediction
+    The model uses historical grid-level LST, NDVI, NDBI and weather features to produce an experimental next-year estimate. Previous temporal tests showed it did not consistently outperform a persistence baseline, so the output is a model demonstration rather than a reliable forecast.
 
     ### 6. Unassessed grids
     Grids excluded for insufficient data coverage remain unassessed. They are not assigned zero scores and must not be interpreted as cooler or lower priority.
@@ -823,7 +663,7 @@ with st.expander("Data and study scope", expanded=False):
     - **Seasonal scope:** Hot-season analysis
     - **Purpose:** Historical heat-pattern analysis and exploratory green-planning support
 
-    This is an environmental decision-support prototype. Any future LST range is an experimental statistical estimate based on short historical records, not a validated climate projection. Year-to-year LST changes can reflect observation timing, cloud/coverage conditions, and surface variability.
+    This is an environmental decision-support prototype. The Random Forest output is experimental, not a validated climate projection. Year-to-year LST changes can reflect observation timing, cloud/coverage conditions, and surface variability.
     """)
 
 st.markdown("---")
