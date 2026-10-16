@@ -1,0 +1,11 @@
+﻿.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*service-account*.json
+credentials.json
+
+dengue-dashboard-main (1).zip
