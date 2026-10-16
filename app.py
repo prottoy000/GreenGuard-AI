@@ -668,6 +668,126 @@ else:
 
 # Clustering outputs remain available in the processed data; advanced cluster tables are hidden from the public dashboard.
 
+
+# ------------------------------ Experimental ML Prediction ------------------------------
+st.markdown("---")
+st.markdown("## Experimental AI Heat Prediction")
+st.caption(
+    "Random Forest model trained on historical grid-level features. "
+    "Predictions are experimental and are not validated climate projections."
+)
+
+ML_MODEL_PATH = ROOT / "data" / "processed" / "greenguard_random_forest.joblib"
+ML_DATA_PATH = ROOT / "data" / "processed" / "greenguard_temporal_dataset_2014_2025.csv"
+
+ML_FEATURES = [
+    "LST_C_mean",
+    "NDVI_mean",
+    "NDBI_mean",
+    "air_temp_c",
+    "relative_humidity_pct",
+    "wind_speed_ms",
+    "rainfall_mm_season",
+]
+
+if not ML_MODEL_PATH.exists() or not ML_DATA_PATH.exists():
+    st.warning("ML model or temporal feature dataset is missing.")
+else:
+    try:
+        import joblib
+
+        @st.cache_resource
+        def load_ml_model(path):
+            return joblib.load(path)
+
+        @st.cache_data
+        def load_ml_features(path):
+            return pd.read_csv(path)
+
+        ml_model = load_ml_model(str(ML_MODEL_PATH))
+        ml_data = load_ml_features(str(ML_DATA_PATH))
+
+        required_columns = ["grid_cell_id", "year"] + ML_FEATURES
+
+        if not set(required_columns).issubset(ml_data.columns):
+            st.error("Temporal dataset is missing required model features.")
+        else:
+            ml_data["grid_cell_id"] = ml_data["grid_cell_id"].astype(str)
+            ml_data = ml_data.sort_values("year")
+
+            # Latest available feature row for each grid.
+            latest_ml = ml_data.drop_duplicates(
+                subset=["grid_cell_id"], keep="last"
+            ).copy()
+
+            latest_ml[ML_FEATURES] = latest_ml[ML_FEATURES].apply(
+                pd.to_numeric, errors="coerce"
+            )
+
+            latest_ml = latest_ml.dropna(subset=ML_FEATURES)
+
+            if latest_ml.empty:
+                st.warning("No complete feature rows are available for prediction.")
+            else:
+                selected_ml_grid = st.selectbox(
+                    "Select grid for ML prediction",
+                    sorted(latest_ml["grid_cell_id"].unique()),
+                    key="experimental_ml_grid",
+                )
+
+                row = latest_ml[
+                    latest_ml["grid_cell_id"] == selected_ml_grid
+                ].iloc[0]
+
+                input_data = pd.DataFrame(
+                    [[row[col] for col in ML_FEATURES]],
+                    columns=ML_FEATURES,
+                )
+
+                predicted_lst = float(ml_model.predict(input_data)[0])
+                last_observed_lst = float(row["LST_C_mean"])
+
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric(
+                    "Experimental RF estimate",
+                    f"{predicted_lst:.2f} °C",
+                    help="Random Forest estimate for the next target year."
+                )
+                col2.metric(
+                    "Latest observed LST",
+                    f"{last_observed_lst:.2f} °C",
+                    f"Feature year: {int(row['year'])}"
+                )
+                col3.metric(
+                    "RF vs. latest LST",
+                    f"{predicted_lst - last_observed_lst:+.2f} °C",
+                    help="Difference between the RF estimate and the latest input LST; not a guaranteed temperature change."
+                )
+
+                st.caption(
+                    f"Grid: {selected_ml_grid} | "
+                    f"Input year: {int(row['year'])} | "
+                    f"Target year: {int(row['year']) + 1}"
+                )
+
+                with st.expander("View model input features"):
+                    st.dataframe(
+                        input_data,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                st.warning(
+                    "Validation note: the current Random Forest did not "
+                    "consistently outperform the persistence baseline in "
+                    "previous temporal tests. Treat this output as an "
+                    "experimental model demonstration, not a reliable forecast."
+                )
+
+    except Exception as exc:
+        st.error(f"Could not generate the ML prediction: {exc}")
+
 # ------------------------------ Methodology ------------------------------
 st.markdown("---")
 st.markdown("## 📘 Methodology & Interpretation")
