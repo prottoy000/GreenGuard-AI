@@ -41,7 +41,18 @@ PRIORITY_COLORS = {"Very Low": "#287D50", "Low": "#66B77A", "Moderate": "#E6C84F
 CLUSTER_COLORS = {"Lower-heat pattern": "#45B97C", "Higher-heat pattern": "#E05252", "Not assessed": "#8A9690"}
 TREND_COLORS = {"Increasing": "#E05252", "Relatively stable": "#F2A541", "Decreasing": "#45B97C", "Insufficient observations": "#8A9690", "Not assessed": "#8A9690"}
 FORECAST_RISK_COLORS = {"Lower": "#45B97C", "Moderate": "#F2A541", "High": "#F39B45", "Very High": "#D94B4B", "Not assessed": "#8A9690"}
-LAYER_OPTIONS = ["Persistent historical heat", "Green-planning priority", "Vegetation Intervention Priority", "AI Heat Pattern Clusters", "Vegetation (NDVI)", "Built-up indicator (NDBI)", "Assessment coverage", "Historical temperature trend", "1-Year Forecast Heat Risk", "2-Year Forecast Heat Risk"]
+
+LAYER_OPTIONS = [
+    "Persistent historical heat",
+    "Green-planning priority",
+    "Vegetation Intervention Priority",
+    "AI Heat Pattern Clusters",
+    "Vegetation (NDVI)",
+    "Built-up indicator (NDBI)",
+    "Assessment coverage",
+    "Historical temperature trend",
+]
+
 
 # ------------------------------ Styling ------------------------------
 st.markdown(f"""
@@ -667,4 +678,6 @@ with st.expander("Data and study scope", expanded=False):
     """)
 
 st.markdown("---")
-st.markdown("<div style='text-align:center;padding:16px 8px 6px;color:#9FBBA8;font-size:12px;line-height:1.8'><b style='color:#6BE0A1'>GreenGuard AI</b><br>AI-Powered Urban Heat Intelligence & Green Planning for DNCC<br>Team 404: Brain Not Found</div>", unsafe_allow_html=True)
+
+st.markdown("<div style='text-align:center;padding:16px 8px 6px;color:#9FBBA8;font-size:12px;line-height:1.8'><b style='color:#6BE0A1'>GreenGuard AI</b><br>AI-Powered Urban Heat Intelligence & Green Planning for DNCC<br>Team Imperio</div>", unsafe_allow_html=True)
+
